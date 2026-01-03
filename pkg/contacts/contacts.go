@@ -19,6 +19,8 @@ type Contact struct {
 	// Metadata
 	Tags  []string `json:"tags,omitempty"`  // Custom tags for organizing contacts
 	Notes string   `json:"notes,omitempty"` // Freeform notes about the contact
+
+	LastSynced *time.Time `json:"last_synced,omitempty"`
 }
 
 type ContactManager struct {
