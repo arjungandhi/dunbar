@@ -3,7 +3,7 @@ package messages
 import (
 	"time"
 
-	"github.com/arjungandhi/pkg/config"
+	"github.com/arjungandhi/dunbar/pkg/config"
 )
 
 // Attachment represents a file attached to a message
@@ -78,12 +78,29 @@ type MessageProvider interface {
 	Sync() ([]Conversation, []Message, error)
 }
 
-func NewMessageManager(provider MessageProvider, db *DB, config config.Config) *MessageManager {
+func NewMessageManager(provider MessageProvider, config config.Config) (*MessageManager, error) {
+	// Ensure dunbar directory exists
+	if err := config.EnsureDunbarDir(); err != nil {
+		return nil, err
+	}
+
+	// Open database at DunbarDir/messages.db
+	dbPath := config.DunbarDir + "/messages.db"
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
 	return &MessageManager{
 		provider: provider,
 		db:       db,
 		config:   config,
-	}
+	}, nil
+}
+
+// Close closes the database connection
+func (mm *MessageManager) Close() error {
+	return mm.db.Close()
 }
 
 // Sync fetches data from the provider and saves it to the database
