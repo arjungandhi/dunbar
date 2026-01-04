@@ -12,6 +12,7 @@ var Cmd = &Z.Cmd{
 		help.Cmd,
 		Version,
 		Contacts,
+		Messages,
 	},
 	Description: `dunbar did not have the internet`,
 }

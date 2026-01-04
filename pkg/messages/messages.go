@@ -141,3 +141,11 @@ func (mm *MessageManager) GetConversation(conversationUID string) (*Conversation
 func (mm *MessageManager) GetConversationsForContact(contactUID string) ([]Conversation, error) {
 	return mm.db.GetConversationsForContact(contactUID)
 }
+
+func (mm *MessageManager) ListAllConversations() ([]Conversation, error) {
+	return mm.db.ListAllConversations()
+}
+
+func (mm *MessageManager) GetMessagesForConversation(conversationUID string) ([]Message, error) {
+	return mm.db.GetMessagesForConversation(conversationUID)
+}

@@ -324,6 +324,80 @@ func (d *DB) GetConversationsForContact(contactUID string) ([]Conversation, erro
 	return conversations, rows.Err()
 }
 
+// ListAllConversations retrieves all conversations from the database
+func (d *DB) ListAllConversations() ([]Conversation, error) {
+	rows, err := d.db.Query(`
+		SELECT id, account_id, platform, title, type,
+		       participant_uids, participant_count,
+		       unread_count, last_activity,
+		       is_archived, is_muted, is_pinned
+		FROM conversations
+		ORDER BY last_activity DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query conversations: %w", err)
+	}
+	defer rows.Close()
+
+	return scanConversations(rows)
+}
+
+// GetMessagesForConversation retrieves all messages for a specific conversation
+func (d *DB) GetMessagesForConversation(conversationUID string) ([]Message, error) {
+	rows, err := d.db.Query(`
+		SELECT id, contact_uid, timestamp, sender_uid, sender_name,
+		       conversation_uid, chat_title, content, platform, platform_id,
+		       is_sent, attachments, sort_key
+		FROM messages
+		WHERE conversation_uid = ?
+		ORDER BY timestamp DESC
+	`, conversationUID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %w", err)
+	}
+	defer rows.Close()
+
+	return scanMessages(rows)
+}
+
+// scanConversations is a helper to scan conversation rows
+func scanConversations(rows *sql.Rows) ([]Conversation, error) {
+	var conversations []Conversation
+	for rows.Next() {
+		var conv Conversation
+		var participantUIDs string
+		var lastActivityUnix int64
+
+		err := rows.Scan(
+			&conv.ID,
+			&conv.AccountID,
+			&conv.Platform,
+			&conv.Title,
+			&conv.Type,
+			&participantUIDs,
+			&conv.ParticipantCount,
+			&conv.UnreadCount,
+			&lastActivityUnix,
+			&conv.IsArchived,
+			&conv.IsMuted,
+			&conv.IsPinned,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan conversation: %w", err)
+		}
+
+		// Parse participant UIDs
+		if err := json.Unmarshal([]byte(participantUIDs), &conv.ParticipantUIDs); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal participant UIDs: %w", err)
+		}
+
+		conv.LastActivity = time.Unix(lastActivityUnix, 0)
+		conversations = append(conversations, conv)
+	}
+
+	return conversations, rows.Err()
+}
+
 // scanMessages is a helper to scan message rows
 func scanMessages(rows *sql.Rows) ([]Message, error) {
 	var messages []Message
