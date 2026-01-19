@@ -2,6 +2,10 @@ package contacts
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +20,9 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
+//go:embed assets/logo.svg
+var logoSVG string
+
 // GoogleCredentials holds OAuth 2.0 credentials for Google
 type GoogleCredentials struct {
 	ClientID     string `json:"client_id"`
@@ -27,11 +34,28 @@ type GoogleCredentials struct {
 
 // GoogleContactsProvider implements ContactProvider for Google Contacts via CardDAV
 type GoogleContactsProvider struct {
-	config      *oauth2.Config
-	token       *oauth2.Token
-	credsPath   string
-	syncToken   string
+	config        *oauth2.Config
+	token         *oauth2.Token
+	credsPath     string
+	syncToken     string
 	syncTokenPath string
+}
+
+// generatePKCE generates a code verifier and code challenge for PKCE flow
+func generatePKCE() (verifier, challenge string, err error) {
+	// Generate code verifier (43-128 characters, base64url encoded)
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", fmt.Errorf("failed to generate random bytes: %w", err)
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(b)
+
+	// Generate code challenge (SHA256 hash of verifier, base64url encoded)
+	h := sha256.New()
+	h.Write([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+
+	return verifier, challenge, nil
 }
 
 // NewGoogleContactsProvider creates a new Google Contacts provider
@@ -93,7 +117,7 @@ func (g *GoogleContactsProvider) Initialize() error {
 		ClientID:     creds.ClientID,
 		ClientSecret: creds.ClientSecret,
 		Endpoint:     google.Endpoint,
-		RedirectURL:  "urn:ietf:wg:oauth:2.0:oob", // For CLI/desktop apps
+		RedirectURL:  "http://localhost:8080/callback", // Local server for OAuth callback
 		Scopes: []string{
 			"https://www.googleapis.com/auth/contacts", // Read/write access
 			"https://www.googleapis.com/auth/userinfo.email",
@@ -118,40 +142,145 @@ func (g *GoogleContactsProvider) Initialize() error {
 	return nil
 }
 
-// GetAuthURL returns the URL users should visit to authorize the app
-func (g *GoogleContactsProvider) GetAuthURL() string {
+// AuthorizeWithPKCE performs OAuth 2.0 Authorization Code flow with PKCE
+// It starts a local HTTP server, opens the browser, waits for callback, and exchanges the code
+func (g *GoogleContactsProvider) AuthorizeWithPKCE(ctx context.Context) (authURL string, errChan <-chan error, err error) {
 	if g.config == nil {
-		return ""
+		return "", nil, fmt.Errorf("provider not initialized")
 	}
-	return g.config.AuthCodeURL("state-token",
+
+	// Generate PKCE parameters
+	verifier, challenge, err := generatePKCE()
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to generate PKCE: %w", err)
+	}
+
+	// Generate random state for CSRF protection
+	stateBytes := make([]byte, 16)
+	rand.Read(stateBytes)
+	state := base64.RawURLEncoding.EncodeToString(stateBytes)
+
+	// Build authorization URL with PKCE
+	authURL = g.config.AuthCodeURL(state,
 		oauth2.AccessTypeOffline,
 		oauth2.ApprovalForce,
+		oauth2.SetAuthURLParam("code_challenge", challenge),
+		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
 	)
-}
 
-// ExchangeAuthCode exchanges an authorization code for tokens
-func (g *GoogleContactsProvider) ExchangeAuthCode(ctx context.Context, code string) error {
-	if g.config == nil {
-		return fmt.Errorf("provider not initialized")
+	// Create channel for result
+	resultCh := make(chan error, 1)
+
+	// Create a new HTTP mux to avoid conflicts with global handlers
+	mux := http.NewServeMux()
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
 	}
 
-	token, err := g.config.Exchange(ctx, code)
-	if err != nil {
-		return fmt.Errorf("failed to exchange auth code: %w", err)
-	}
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		// Check for OAuth errors
+		if errMsg := r.URL.Query().Get("error"); errMsg != "" {
+			errDesc := r.URL.Query().Get("error_description")
+			http.Error(w, "Authorization failed", http.StatusBadRequest)
+			resultCh <- fmt.Errorf("authorization failed: %s - %s", errMsg, errDesc)
+			return
+		}
 
-	g.token = token
+		// Get authorization code
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			http.Error(w, "No authorization code received", http.StatusBadRequest)
+			resultCh <- fmt.Errorf("no authorization code in callback")
+			return
+		}
 
-	// Save the refresh token
-	creds, err := g.LoadCredentials()
-	if err != nil {
-		return err
-	}
+		// Verify state to prevent CSRF
+		returnedState := r.URL.Query().Get("state")
+		if returnedState != state {
+			http.Error(w, "Invalid state parameter", http.StatusBadRequest)
+			resultCh <- fmt.Errorf("state mismatch: CSRF attack detected")
+			return
+		}
 
-	creds.RefreshToken = token.RefreshToken
-	creds.AccessToken = token.AccessToken
+		// Exchange code for token with PKCE verifier
+		token, err := g.config.Exchange(ctx, code,
+			oauth2.SetAuthURLParam("code_verifier", verifier),
+		)
+		if err != nil {
+			http.Error(w, "Token exchange failed", http.StatusInternalServerError)
+			resultCh <- fmt.Errorf("failed to exchange code: %w", err)
+			return
+		}
 
-	return g.SaveCredentials(creds)
+		g.token = token
+
+		// Save tokens
+		creds, err := g.LoadCredentials()
+		if err != nil {
+			http.Error(w, "Failed to save credentials", http.StatusInternalServerError)
+			resultCh <- fmt.Errorf("failed to load credentials: %w", err)
+			return
+		}
+
+		creds.RefreshToken = token.RefreshToken
+		creds.AccessToken = token.AccessToken
+
+		if err := g.SaveCredentials(creds); err != nil {
+			http.Error(w, "Failed to save credentials", http.StatusInternalServerError)
+			resultCh <- fmt.Errorf("failed to save credentials: %w", err)
+			return
+		}
+
+		// Send success page
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `
+			<html>
+			<head>
+				<title>Authorization Successful</title>
+				<style>
+					.logo-container { width: 200px; height: 200px; margin: 0 auto 30px; }
+					.logo-container svg { width: 100%%; height: 100%%; }
+				</style>
+			</head>
+			<body style="font-family: sans-serif; text-align: center; padding: 50px;">
+				<div class="logo-container">
+					%s
+				</div>
+				<h1 style="color: #4CAF50; margin: 20px 0;">Authorization Successful!</h1>
+				<p>You can close this window and return to the terminal.</p>
+			</body>
+			</html>
+		`, logoSVG)
+
+		// Signal success
+		resultCh <- nil
+
+		// Shutdown server after brief delay to ensure response is sent
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			server.Shutdown(context.Background())
+		}()
+	})
+
+	// Start server in background
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			resultCh <- fmt.Errorf("server error: %w", err)
+		}
+	}()
+
+	// Handle context cancellation
+	go func() {
+		<-ctx.Done()
+		server.Shutdown(context.Background())
+		select {
+		case resultCh <- ctx.Err():
+		default:
+		}
+	}()
+
+	return authURL, resultCh, nil
 }
 
 // GetHTTPClient returns an authenticated HTTP client
@@ -374,6 +503,17 @@ func (g *GoogleContactsProvider) FetchContacts() ([]Contact, error) {
 	}
 	g.token = newToken
 	httpClient = g.config.Client(ctx, g.token)
+
+	// Save the refreshed token to disk
+	creds, err := g.LoadCredentials()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load credentials: %w", err)
+	}
+	creds.RefreshToken = newToken.RefreshToken
+	creds.AccessToken = newToken.AccessToken
+	if err := g.SaveCredentials(creds); err != nil {
+		return nil, fmt.Errorf("failed to save refreshed token: %w", err)
+	}
 
 	// Fetch contacts from People API
 	var allContacts []Contact

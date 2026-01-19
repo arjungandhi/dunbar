@@ -198,7 +198,7 @@ func initGoogleProvider(cfg *config.Config) error {
 					"1. Enable People API at: console.cloud.google.com/apis/library/people.googleapis.com\n" +
 					"2. Go to: console.cloud.google.com/apis/credentials\n" +
 					"3. Create OAuth 2.0 Client ID (Application type: Desktop app)\n" +
-					"4. No redirect URIs needed (auto-includes urn:ietf:wg:oauth:2.0:oob)"),
+					"4. Add redirect URI: http://localhost:8080/callback"),
 		),
 		huh.NewGroup(
 			huh.NewInput().
@@ -247,41 +247,34 @@ func initGoogleProvider(cfg *config.Config) error {
 		return fmt.Errorf("failed to initialize provider: %w", err)
 	}
 
-	// Get auth URL and open browser
-	authURL := provider.GetAuthURL()
-	_ = openBrowser(authURL)
-
-	fmt.Println("\nOpening your browser for authorization...")
-	fmt.Println("If the browser doesn't open, copy this URL manually:")
-	fmt.Println()
-	fmt.Println(authURL)
-	fmt.Println()
-
-	// Prompt for auth code
-	var authCode string
-	authForm := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Authorization Code").
-				Description("Enter the authorization code from Google:").
-				Value(&authCode).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("authorization code cannot be empty")
-					}
-					return nil
-				}),
-		),
-	)
-
-	if err := authForm.Run(); err != nil {
-		return fmt.Errorf("setup cancelled: %w", err)
+	// Start Authorization Code + PKCE flow
+	ctx := context.Background()
+	authURL, errChan, err := provider.AuthorizeWithPKCE(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to start authorization: %w", err)
 	}
 
-	// Exchange auth code for token
-	ctx := context.Background()
-	if err := provider.ExchangeAuthCode(ctx, strings.TrimSpace(authCode)); err != nil {
-		return fmt.Errorf("failed to exchange auth code: %w", err)
+	// Display instructions and open browser
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("Google Authorization Required")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println()
+	fmt.Println("Opening your browser for authorization...")
+	fmt.Println("If the browser doesn't open, visit this URL:")
+	fmt.Printf("\n  %s\n\n", authURL)
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println()
+
+	// Try to open browser
+	_ = openBrowser(authURL)
+
+	fmt.Println("Waiting for authorization...")
+	fmt.Println("(Please complete the authorization in your browser)")
+	fmt.Println()
+
+	// Wait for authorization to complete
+	if err := <-errChan; err != nil {
+		return fmt.Errorf("authorization failed: %w", err)
 	}
 
 	fmt.Println("\nGoogle Contacts provider initialized successfully!")
@@ -297,37 +290,34 @@ func reauthorizeGoogleProvider(cfg *config.Config, provider *contacts.GoogleCont
 		return fmt.Errorf("failed to initialize provider: %w", err)
 	}
 
-	// Get auth URL
-	authURL := provider.GetAuthURL()
-
-	// Open browser
-	_ = openBrowser(authURL)
-
-	fmt.Println("Opening your browser for authorization...")
-	fmt.Println("If the browser doesn't open, copy this URL manually:")
-	fmt.Println()
-	fmt.Println(authURL)
-	fmt.Println()
-
-	// Prompt for auth code using huh
-	var authCode string
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Authorization Code").
-				Description("Enter the authorization code from Google:").
-				Value(&authCode),
-		),
-	)
-
-	if err := form.Run(); err != nil {
-		return fmt.Errorf("prompt failed: %w", err)
+	// Start Authorization Code + PKCE flow
+	ctx := context.Background()
+	authURL, errChan, err := provider.AuthorizeWithPKCE(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to start authorization: %w", err)
 	}
 
-	// Exchange auth code for token
-	ctx := context.Background()
-	if err := provider.ExchangeAuthCode(ctx, strings.TrimSpace(authCode)); err != nil {
-		return fmt.Errorf("failed to exchange auth code: %w", err)
+	// Display instructions and open browser
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("Google Re-authorization Required")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println()
+	fmt.Println("Opening your browser for authorization...")
+	fmt.Println("If the browser doesn't open, visit this URL:")
+	fmt.Printf("\n  %s\n\n", authURL)
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println()
+
+	// Try to open browser
+	_ = openBrowser(authURL)
+
+	fmt.Println("Waiting for authorization...")
+	fmt.Println("(Please complete the authorization in your browser)")
+	fmt.Println()
+
+	// Wait for authorization to complete
+	if err := <-errChan; err != nil {
+		return fmt.Errorf("authorization failed: %w", err)
 	}
 
 	fmt.Println("\nGoogle Contacts provider re-authorized successfully!")
